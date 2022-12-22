@@ -156,18 +156,17 @@ class YoutubeDLHelper:
                 elif 'filesize' in entry:
                     self.__size += entry['filesize']
                 if name == "":
-                    outtmpl_ ='%(series,playlist_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d'
+                    outtmpl_ = '%(series,playlist_title,channel)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d'
                     self.name = ydl.prepare_filename(entry, outtmpl=outtmpl_)
                 else:
                     self.name = name
         else:
             outtmpl_ ='%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s'
             realName = ydl.prepare_filename(result, outtmpl=outtmpl_)
-            ext = realName.rsplit('.', 1)[-1]
             if name == "":
-                newname = realName.split(f" [{result['id'].replace('*', '_')}]")
-                self.name = f'{newname[0]}.{ext}' if len(newname) > 1 else newname[0]
+                self.name = realName
             else:
+                ext = realName.rsplit('.', 1)[-1]
                 self.name = f"{name}.{ext}"
 
     def __download(self, link, path):

@@ -4,9 +4,10 @@ from time import time, sleep
 from os import remove, rename, path as ospath, environ
 from subprocess import run as srun, Popen
 from dotenv import load_dotenv
+from shutil import rmtree
 
-from bot import config_dict, dispatcher, user_data, DATABASE_URL, MAX_SPLIT_SIZE, DRIVES_IDS, DRIVES_NAMES, INDEX_URLS, aria2, GLOBAL_EXTENSION_FILTER, status_reply_dict_lock, Interval, aria2_options, aria2c_global, IS_PREMIUM_USER, download_dict, qbit_options, get_client
-from bot.helper.telegram_helper.message_utils import sendFile, sendMarkup, editMessage, update_all_messages
+from bot import config_dict, dispatcher, user_data, DATABASE_URL, MAX_SPLIT_SIZE, DRIVES_IDS, DRIVES_NAMES, INDEX_URLS, aria2, GLOBAL_EXTENSION_FILTER, status_reply_dict_lock, Interval, aria2_options, aria2c_global, IS_PREMIUM_USER, download_dict, qbit_options, get_client, LOGGER
+from bot.helper.telegram_helper.message_utils import sendMessage, sendFile, editMessage, update_all_messages
 from bot.helper.telegram_helper.filters import CustomFilters
 from bot.helper.telegram_helper.bot_commands import BotCommands
 from bot.helper.telegram_helper.button_build import ButtonMaker
@@ -161,7 +162,7 @@ def load_config():
     RSS_DELAY = environ.get('RSS_DELAY', '')
     RSS_DELAY = 900 if len(RSS_DELAY) == 0 else int(RSS_DELAY)
 
-    CMD_PERFIX = environ.get('CMD_PERFIX', '')
+    CMD_SUFFIX = environ.get('CMD_SUFFIX', '')
 
     USER_SESSION_STRING = environ.get('USER_SESSION_STRING', '')
 
@@ -170,13 +171,26 @@ def load_config():
     TORRENT_TIMEOUT = environ.get('TORRENT_TIMEOUT', '')
     downloads = aria2.get_downloads()
     if len(TORRENT_TIMEOUT) == 0:
-        if downloads:
-            aria2.set_options({'bt-stop-timeout': '0'}, downloads)
+        for download in downloads:
+            if not download.is_complete:
+                try:
+                    aria2.client.change_option(download.gid, {'bt-stop-timeout': '0'})
+                except Exception as e:
+                    LOGGER.error(e)
         aria2_options['bt-stop-timeout'] = '0'
+        if DATABASE_URL:
+            DbManger().update_aria2('bt-stop-timeout', '0')
+        TORRENT_TIMEOUT = ''
     else:
-        if downloads:
-            aria2.set_options({'bt-stop-timeout': TORRENT_TIMEOUT}, downloads)
+        for download in downloads:
+            if not download.is_complete:
+                try:
+                    aria2.client.change_option(download.gid, {'bt-stop-timeout': TORRENT_TIMEOUT})
+                except Exception as e:
+                    LOGGER.error(e)
         aria2_options['bt-stop-timeout'] = TORRENT_TIMEOUT
+        if DATABASE_URL:
+            DbManger().update_aria2('bt-stop-timeout', TORRENT_TIMEOUT)
         TORRENT_TIMEOUT = int(TORRENT_TIMEOUT)
 
     INCOMPLETE_TASK_NOTIFIER = environ.get('INCOMPLETE_TASK_NOTIFIER', '')
@@ -254,7 +268,7 @@ def load_config():
                         'AUTO_DELETE_MESSAGE_DURATION': AUTO_DELETE_MESSAGE_DURATION,
                         'BASE_URL': BASE_URL,
                         'BOT_TOKEN': BOT_TOKEN,
-                        'CMD_PERFIX': CMD_PERFIX,
+                        'CMD_SUFFIX': CMD_SUFFIX,
                         'DATABASE_URL': DATABASE_URL,
                         'DOWNLOAD_DIR': DOWNLOAD_DIR,
                         'DUMP_CHAT': DUMP_CHAT,
@@ -301,7 +315,7 @@ def load_config():
 def get_buttons(key=None, edit_type=None):
     buttons = ButtonMaker()
     if key is None:
-        buttons.sbutton('Edit Variables', "botset var")
+        buttons.sbutton('Config Variables', "botset var")
         buttons.sbutton('Private Files', "botset private")
         buttons.sbutton('Qbit Settings', "botset qbit")
         buttons.sbutton('Aria2c Settings', "botset aria")
@@ -403,8 +417,12 @@ def edit_variable(update, context, omsg, key):
     elif key == 'TORRENT_TIMEOUT':
         value = int(value)
         downloads = aria2.get_downloads()
-        if downloads:
-            aria2.set_options({'bt-stop-timeout': f'{value}'}, downloads)
+        for download in downloads:
+            if not download.is_complete:
+                try:
+                    aria2.client.change_option(download.gid, {'bt-stop-timeout': f'{value}'})
+                except Exception as e:
+                    LOGGER.error(e)
         aria2_options['bt-stop-timeout'] = f'{value}'
     elif key == 'LEECH_SPLIT_SIZE':
         value = min(int(value), MAX_SPLIT_SIZE)
@@ -451,8 +469,12 @@ def edit_aria(update, context, omsg, key):
         aria2.set_global_options({key: value})
     else:
         downloads = aria2.get_downloads()
-        if downloads:
-            aria2.set_options({key: value}, downloads)
+        for download in downloads:
+            if not download.is_complete:
+                try:
+                    aria2.client.change_option(download.gid, {key: value})
+                except Exception as e:
+                    LOGGER.error(e)
     aria2_options[key] = value
     update_buttons(omsg, 'aria')
     update.message.delete()
@@ -485,11 +507,17 @@ def update_private_file(update, context, omsg):
         file_name = message.text
         fn = file_name.rsplit('.zip', 1)[0]
         if ospath.exists(fn):
-            remove(fn)
-        if fn == 'accounts':
-            config_dict['USE_SERVICE_ACCOUNTS'] = False
-            if DATABASE_URL:
-                DbManger().update_config({'USE_SERVICE_ACCOUNTS': False})
+            if fn == 'accounts':
+                rmtree(fn)
+                config_dict['USE_SERVICE_ACCOUNTS'] = False
+                if DATABASE_URL:
+                    DbManger().update_config({'USE_SERVICE_ACCOUNTS': False})
+            else:
+                remove(fn)
+        if file_name in ['.netrc', 'netrc']:
+            srun(["touch", ".netrc"])
+            srun(["cp", ".netrc", "/root/.netrc"])
+            srun(["chmod", "600", ".netrc"])
         update.message.delete()
     else:
         doc = update.message.document
@@ -532,7 +560,7 @@ def update_private_file(update, context, omsg):
             msg = 'Push to UPSTREAM_REPO ?'
             buttons.sbutton('Yes!', f"botset push {file_name}")
             buttons.sbutton('No', "botset close")
-            sendMarkup(msg, context.bot, update.message, buttons.build_menu(2))
+            sendMessage(msg, context.bot, update.message, buttons.build_menu(2))
         else:
             update.message.delete()
     update_buttons(omsg)
@@ -580,9 +608,15 @@ def edit_bot_settings(update, context):
             GLOBAL_EXTENSION_FILTER.append('.aria2')
         elif data[2] == 'TORRENT_TIMEOUT':
             downloads = aria2.get_downloads()
-            if downloads:
-                aria2.set_options({'bt-stop-timeout': '0'}, downloads)
+            for download in downloads:
+                if not download.is_complete:
+                    try:
+                        aria2.client.change_option(download.gid, {'bt-stop-timeout': '0'})
+                    except Exception as e:
+                        LOGGER.error(e)
             aria2_options['bt-stop-timeout'] = '0'
+            if DATABASE_URL:
+                DbManger().update_aria2('bt-stop-timeout', '0')
         elif data[2] == 'BASE_URL':
             srun(["pkill", "-9", "-f", "gunicorn"])
         elif data[2] == 'SERVER_PORT':
@@ -614,8 +648,12 @@ def edit_bot_settings(update, context):
         aria2_options[data[2]] = value
         update_buttons(message, 'aria')
         downloads = aria2.get_downloads()
-        if downloads:
-            aria2.set_options({data[2]: value}, downloads)
+        for download in downloads:
+            if not download.is_complete:
+                try:
+                    aria2.client.change_option(download.gid, {data[2]: value})
+                except Exception as e:
+                    LOGGER.error(e)
         if DATABASE_URL:
             DbManger().update_aria2(data[2], value)
     elif data[1] == 'emptyaria':
@@ -624,8 +662,12 @@ def edit_bot_settings(update, context):
         aria2_options[data[2]] = ''
         update_buttons(message, 'aria')
         downloads = aria2.get_downloads()
-        if downloads:
-            aria2.set_options({data[2]: ''}, downloads)
+        for download in downloads:
+            if not download.is_complete:
+                try:
+                    aria2.client.change_option(download.gid, {data[2]: ''})
+                except Exception as e:
+                    LOGGER.error(e)
         if DATABASE_URL:
             DbManger().update_aria2(data[2], '')
     elif data[1] == 'emptyqbit':
@@ -646,7 +688,7 @@ def edit_bot_settings(update, context):
         handler_dict[message.chat.id] = True
         update_buttons(message, 'private')
         partial_fnc = partial(update_private_file, omsg=message)
-        file_handler = MessageHandler(filters=(Filters.document | Filters.text) & Filters.chat(message.chat.id) & Filters.user(user_id), callback=partial_fnc, run_async=True)
+        file_handler = MessageHandler(filters=(Filters.document | Filters.text) & Filters.chat(message.chat.id) & Filters.user(user_id), callback=partial_fnc)
         dispatcher.add_handler(file_handler)
         while handler_dict[message.chat.id]:
             if time() - start_time > 60:
@@ -654,7 +696,7 @@ def edit_bot_settings(update, context):
                 update_buttons(message)
         dispatcher.remove_handler(file_handler)
     elif data[1] == 'editvar' and STATE == 'edit':
-        if data[2] in ['SUDO_USERS', 'RSS_USER_SESSION_STRING', 'IGNORE_PENDING_REQUESTS', 'CMD_PERFIX', 'OWNER_ID',
+        if data[2] in ['SUDO_USERS', 'RSS_USER_SESSION_STRING', 'IGNORE_PENDING_REQUESTS', 'CMD_SUFFIX', 'OWNER_ID',
                        'USER_SESSION_STRING', 'TELEGRAM_HASH', 'TELEGRAM_API', 'AUTHORIZED_CHATS', 'RSS_DELAY'
                        'DATABASE_URL', 'BOT_TOKEN', 'DOWNLOAD_DIR']:
             query.answer(text='Restart required for this edit to take effect!', show_alert=True)
@@ -668,7 +710,7 @@ def edit_bot_settings(update, context):
         update_buttons(message, data[2], data[1])
         partial_fnc = partial(edit_variable, omsg=message, key=data[2])
         value_handler = MessageHandler(filters=Filters.text & Filters.chat(message.chat.id) & Filters.user(user_id),
-                                       callback=partial_fnc, run_async=True)
+                                       callback=partial_fnc)
         dispatcher.add_handler(value_handler)
         while handler_dict[message.chat.id]:
             if time() - start_time > 60:
@@ -696,8 +738,8 @@ def edit_bot_settings(update, context):
         handler_dict[message.chat.id] = True
         update_buttons(message, data[2], data[1])
         partial_fnc = partial(edit_aria, omsg=message, key=data[2])
-        value_handler = MessageHandler(filters=Filters.text & Filters.chat(message.chat.id) &
-                        (CustomFilters.owner_filter | CustomFilters.sudo_user), callback=partial_fnc, run_async=True)
+        value_handler = MessageHandler(filters=Filters.text & Filters.chat(message.chat.id) & Filters.user(user_id),
+                                       callback=partial_fnc)
         dispatcher.add_handler(value_handler)
         while handler_dict[message.chat.id]:
             if time() - start_time > 60:
@@ -725,8 +767,8 @@ def edit_bot_settings(update, context):
         handler_dict[message.chat.id] = True
         update_buttons(message, data[2], data[1])
         partial_fnc = partial(edit_qbit, omsg=message, key=data[2])
-        value_handler = MessageHandler(filters=Filters.text & Filters.chat(message.chat.id) &
-                        (CustomFilters.owner_filter | CustomFilters.sudo_user), callback=partial_fnc, run_async=True)
+        value_handler = MessageHandler(filters=Filters.text & Filters.chat(message.chat.id) & Filters.user(user_id),
+                                       callback=partial_fnc)
         dispatcher.add_handler(value_handler)
         while handler_dict[message.chat.id]:
             if time() - start_time > 60:
@@ -761,7 +803,7 @@ def edit_bot_settings(update, context):
     elif data[1] == 'push':
         query.answer()
         filename = data[2].rsplit('.zip', 1)[0]
-        if ospath.exits(filename):
+        if ospath.exists(filename):
             srun([f"git add -f {filename} \
                     && git commit -sm botsettings -q \
                     && git push origin {config_dict['UPSTREAM_BRANCH']} -q"], shell=True)
@@ -775,12 +817,12 @@ def edit_bot_settings(update, context):
 
 def bot_settings(update, context):
     msg, button = get_buttons()
-    sendMarkup(msg, context.bot, update.message, button)
+    sendMessage(msg, context.bot, update.message, button)
 
 
 bot_settings_handler = CommandHandler(BotCommands.BotSetCommand, bot_settings,
-                                      filters=CustomFilters.owner_filter | CustomFilters.sudo_user, run_async=True)
-bb_set_handler = CallbackQueryHandler(edit_bot_settings, pattern="botset", run_async=True)
+                                      filters=CustomFilters.owner_filter | CustomFilters.sudo_user)
+bb_set_handler = CallbackQueryHandler(edit_bot_settings, pattern="botset")
 
 dispatcher.add_handler(bot_settings_handler)
 dispatcher.add_handler(bb_set_handler)
